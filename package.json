@@ -1,6 +1,6 @@
 {
   "name": "@projectrevivesolutions/witness",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Witness: the instrumentation MikeVan's AI Development Toolkit owns. A textual instrumenter on tree-sitter with Istanbul-shaped maps, a runtime that records which test reached every line, decision, and function, and the hooks that put it into Node's loader, a Vite build, and Playwright's workers. One instrument, every framework; shared by DeepTest and UntangleIt and bundled into each.",
   "license": "GPL-3.0-only",
   "repository": {
