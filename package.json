@@ -1,0 +1,36 @@
+{
+  "name": "@projectrevivesolutions/witness",
+  "version": "1.0.9",
+  "description": "Witness: the instrumentation MikeVan's AI Development Toolkit owns. A textual instrumenter on tree-sitter with Istanbul-shaped maps, a runtime that records which test reached every line, decision, and function, and the hooks that put it into Node's loader, a Vite build, and Playwright's workers. One instrument, every framework; shared by DeepTest and UntangleIt and bundled into each.",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mikevan/Witness.git"
+  },
+  "homepage": "https://projectrevivesolutions.com",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "docs",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node esbuild.mjs",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "prepare": "npm run build"
+  },
+  "peerDependencies": {
+    "web-tree-sitter": ">=0.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.17",
+    "esbuild": "0.28.2",
+    "istanbul-lib-instrument": "^6.0.3",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7",
+    "web-tree-sitter": "0.27.0"
+  }
+}
