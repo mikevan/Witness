@@ -203,8 +203,9 @@ test('the loader: ES modules and CommonJS through one hook, with lines, outcomes
     env: { ...process.env, [ENV.hooksDir]: hooks, [ENV.wasmDir]: wasmDir, [ENV.sourceRoot]: src, [ENV.coverageDir]: cov, [ENV.attributionDir]: attr },
   }).toString();
   assert.match(stdout, /checked 384/, 'the instrumented villain and the plain one agree on every input');
-  const parts = fs.readdirSync(cov).filter((f) => /^coverage-\d+\.json$/.test(f));
-  assert.equal(parts.length, 1, 'one report per process');
+  // coverage-<pid>-<threadId>.json: one report per worker, not per process.
+  const parts = fs.readdirSync(cov).filter((f) => /^coverage-\d+-\d+\.json$/.test(f));
+  assert.equal(parts.length, 1, 'one report per worker');
   const report = JSON.parse(fs.readFileSync(path.join(cov, parts[0]), 'utf8')) as Record<string, { s: Record<string, number>; b: Record<string, number[]>; f: Record<string, number> }>;
   const key = (name: string) => Object.keys(report).find((k) => k.endsWith(name))!;
   assert.ok(key('esm.mjs') && key('cjs.cjs'), Object.keys(report).join(', '));
@@ -245,6 +246,21 @@ test('the Vite plugin: instruments a component build with the maps embedded and 
   assert.equal(out.code.split('\n').length, greeting.split('\n').length);
   assert.equal(plugin.transform(greeting, path.join(src, 'components', 'Greeting.spec.tsx')), null, 'a spec is left alone');
   assert.equal(plugin.transform(greeting, path.join(dir, 'elsewhere', 'x.tsx')), null, 'outside the root is left alone');
+  // Vite gives transform() ids with forward slashes on every platform, so an id
+  // that does not use the host separator still has to match the source root. On
+  // Windows this failed and the plugin quietly instrumented nothing: the run
+  // passed, the report came back empty, and every file read as untested. Every
+  // id above uses path.join, so none of them caught it.
+  const asVite = (p: string): string => p.split(path.sep).join('/');
+  assert.ok(
+    plugin.transform(greeting, asVite(path.join(src, 'components', 'Greeting.tsx'))),
+    'a posix-style id under the root is transformed, whatever the host separator',
+  );
+  assert.equal(
+    plugin.transform(greeting, asVite(path.join(dir, 'elsewhere', 'x.tsx'))),
+    null,
+    'and a posix-style id outside the root is still left alone',
+  );
   const tags = plugin.transformIndexHtml();
   assert.equal(tags[0].tag, 'script');
   assert.match(tags[0].children, /globalThis\.__witness__ = witness/, 'the runtime, verbatim, ahead of every module');
@@ -281,4 +297,49 @@ test('the Playwright worker hook: a spec gets the fixture, the fixture and node_
     env: { ...process.env, [ENV.fixture]: fixtureFile, [ENV.ctPackage]: '@playwright/experimental-ct-vue' },
   }).toString();
   assert.deepEqual(JSON.parse(stdout), { test: 'witness over package test', expect: 'package expect', deeper: 'package test' }, 'the spec gets the fixture\'s test and the package\'s everything else; a package under node_modules gets the package');
+});
+
+/**
+ * Two workers in one process must not share a record file. A process id does
+ * not separate threads, so before the worker tag both of these appended to one
+ * path and one worker's per-test lines landed in the other's file. This fails
+ * with a single file if the tag is ever removed.
+ */
+test('two worker threads write separate record files', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'witness-workers-'));
+  const hook = path.join(process.cwd(), 'hooks', 'witness.cjs');
+  const workerFile = path.join(dir, 'worker.cjs');
+  fs.writeFileSync(
+    workerFile,
+    [
+      "const { workerData } = require('node:worker_threads');",
+      'const w = require(workerData.hook);',
+      'w.begin(`spec.test.js::case ${workerData.n}`);',
+      'w.end();',
+      '',
+    ].join('\n'),
+  );
+  const { Worker } = await import('node:worker_threads');
+  await Promise.all(
+    [1, 2].map(
+      (n) =>
+        new Promise<void>((resolve, reject) => {
+          const worker = new Worker(workerFile, {
+            workerData: { hook, n },
+            env: { ...process.env, [ENV.attributionDir]: dir },
+          });
+          worker.on('error', reject);
+          worker.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`worker ${n} exited with ${code}`))));
+        }),
+    ),
+  );
+  const files = fs.readdirSync(dir).filter((f) => f.startsWith('attr-witness-'));
+  assert.equal(files.length, 2, `two workers should write two files, got: ${files.join(', ')}`);
+  const records = files
+    .flatMap((f) => fs.readFileSync(path.join(dir, f), 'utf8').split('\n').filter(Boolean))
+    .map((line) => JSON.parse(line) as { test: string });
+  assert.deepEqual(
+    records.map((r) => r.test).sort(),
+    ['spec.test.js::case 1', 'spec.test.js::case 2'],
+  );
 });

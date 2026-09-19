@@ -39,7 +39,7 @@ export function wasmDir(): string {
 }
 
 /** Every hook file a tool copies into a project, in dist/hooks. */
-export const HOOK_FILES = ['witness.cjs', 'witness-instrument.cjs', 'witness-loader.mjs', 'witness-vite.mjs', 'witness-playwright-loader.mjs', 'witness-playwright.template.ts', 'mocha.cjs'] as const;
+export const HOOK_FILES = ['witness.cjs', 'witness-instrument.cjs', 'witness-loader.mjs', 'witness-vite.mjs', 'witness-vitest.mjs', 'witness-playwright-loader.mjs', 'witness-playwright.template.ts', 'mocha.cjs'] as const;
 
 /** The environment the hooks read. A tool sets these on the process it launches. */
 export const ENV = {

@@ -14,6 +14,13 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
+
+// Vite hands `transform` module ids with forward slashes on every platform,
+// while path.resolve on Windows answers with backslashes. Comparing the two
+// directly meant nothing under the source root ever matched on Windows, the
+// plugin instrumented nothing, and the run still passed with an empty report.
+// Both sides are normalised, so the comparison is the same everywhere.
+const toPosix = (p) => p.split('\\').join('/');
 const SOURCE = /\.(m?[jt]sx?|c[jt]s)$/;
 const SKIP = /[\\/](node_modules|\.deeptest|\.untangleit|playwright)[\\/]|\.(test|spec|ct)\.[cm]?[jt]sx?$|[\\/]__tests__[\\/]|\.d\.ts$/;
 
@@ -22,7 +29,7 @@ const SKIP = /[\\/](node_modules|\.deeptest|\.untangleit|playwright)[\\/]|\.(tes
  */
 export function witnessPlugin(options) {
   const hooksDir = options.hooksDir || here;
-  const sourceRoot = path.resolve(options.sourceRoot);
+  const sourceRoot = toPosix(path.resolve(options.sourceRoot));
   const runtimeSource = fs.readFileSync(path.join(hooksDir, 'witness.cjs'), 'utf8');
   let instrumenter;
   return {
@@ -33,12 +40,12 @@ export function witnessPlugin(options) {
       instrumenter = await createInstrumenter(options.wasmDir);
     },
     transform(code, id) {
-      const file = id.split('?')[0];
+      const file = toPosix(id.split('?')[0]);
       if (!instrumenter || !file.startsWith(sourceRoot) || !SOURCE.test(file) || SKIP.test(file)) {
         return null;
       }
       try {
-        const out = instrumenter.instrument(file.split(path.sep).join('/'), code, true);
+        const out = instrumenter.instrument(file, code, true);
         // Every line is where it was; columns moved. No map is right: Vite then
         // treats the output as line-aligned with the input, which it is.
         return { code: out.code, map: null };

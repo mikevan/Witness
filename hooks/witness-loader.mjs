@@ -61,9 +61,9 @@ process.on('exit', () => {
   try {
     witness.end();
     if (coverageDir) {
-      // One file per process: a runner with workers (Mocha --parallel,
-      // Playwright) has several, and the driver sums them.
-      witness.writeReport(coverageDir, `coverage-${process.pid}.json`);
+      // One file per worker, not per process: a runner with workers has
+      // several, in processes or in threads, and the driver sums them all.
+      witness.writeReport(coverageDir, `coverage-${witness.workerTag()}.json`);
     }
   } catch {
     // never fail the run over the report

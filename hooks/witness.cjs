@@ -21,8 +21,20 @@ const inNode = typeof process !== 'undefined' && process.versions && process.ver
 const fs = inNode ? require('node:fs') : undefined;
 const path = inNode ? require('node:path') : undefined;
 
+// A process id is not unique enough. A runner that puts its workers in threads
+// (Vitest can) gives each worker its own globalThis, so each loads its own copy
+// of this file, while they all share one process id. Two workers would then
+// append per-test lines to the same path. Node's own threadId separates them,
+// is 0 on the main thread, and costs the library no knowledge of any runner.
+const threadId = inNode ? require('node:worker_threads').threadId : 0;
+
+/** Unique per worker, across processes and across threads within a process. */
+function workerTag() {
+  return `${process.pid}-${threadId}`;
+}
+
 const attributionDir = inNode ? process.env.WITNESS_ATTRIBUTION_DIR : undefined;
-const attributionFile = attributionDir ? path.join(attributionDir, `attr-witness-${process.pid}.jsonl`) : undefined;
+const attributionFile = attributionDir ? path.join(attributionDir, `attr-witness-${workerTag()}.jsonl`) : undefined;
 
 const files = new Map(); // handle -> { path, cov, W }
 let currentTest = undefined;
@@ -223,6 +235,8 @@ const witness = {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, name), JSON.stringify(coverageView()));
   },
+  /** Unique per worker; a hook names its per-worker report with this. */
+  workerTag,
   get current() {
     return currentTest;
   },
