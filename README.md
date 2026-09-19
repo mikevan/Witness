@@ -2,7 +2,7 @@
 
 "Coverage tells you a line ran. Witness tells you which test ran it, which way every decision went, and which functions it entered."
 
-Witness is the instrumentation MikeVan's AI Development Toolkit owns: one instrument for every JavaScript framework the toolkit serves, shared by DeepTest and UntangleIt and bundled into each at build time, so neither tool depends on the other being installed. It is a library, `@projectrevivesolutions/witness`, beside `@projectrevivesolutions/complexity`.
+Witness is the instrumentation MikeVan's AI Development Toolkit owns: one instrumenter, one runtime, and one record shape behind every runner it serves, shared by DeepTest and UntangleIt and bundled into each at build time, so neither tool depends on the other being installed. It does not serve every runner yet. Where a project's own tooling already instruments for us, that tooling stays in charge and Witness stays out; `docs/witness.md` says which runners are on which side today. It is a library, `@projectrevivesolutions/witness`, beside `@projectrevivesolutions/complexity`.
 
 It never writes to a file in a project. The instrumenter hands the engine counted text in memory, in the moment between reading a file and running it; the file on disk is never opened for writing and the counted text is never saved. The only files a tool writes are its own, under its own folder in the project (`.deeptest\`, `.untangleit\`).
 
