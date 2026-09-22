@@ -250,17 +250,19 @@ test('the Vite plugin: instruments a component build with the maps embedded and 
   // that does not use the host separator still has to match the source root. On
   // Windows this failed and the plugin quietly instrumented nothing: the run
   // passed, the report came back empty, and every file read as untested. Every
-  // id above uses path.join, so none of them caught it.
-  const asVite = (p: string): string => p.split(path.sep).join('/');
-  assert.ok(
-    plugin.transform(greeting, asVite(path.join(src, 'components', 'Greeting.tsx'))),
-    'a posix-style id under the root is transformed, whatever the host separator',
-  );
-  assert.equal(
-    plugin.transform(greeting, asVite(path.join(dir, 'elsewhere', 'x.tsx'))),
-    null,
-    'and a posix-style id outside the root is still left alone',
-  );
+  // id above uses path.join, so none of them caught it. The first version of
+  // this test derived the id from path.sep, which on Linux is the same string
+  // as the id above it, so the test could only fail on Windows. The mismatch
+  // is built explicitly now: both spellings of the same path, on every host,
+  // and one of them is never the host's own.
+  const forward = (p: string): string => p.split('\\').join('/');
+  const backward = (p: string): string => p.split('/').join('\\');
+  const inside = path.join(src, 'components', 'Greeting.tsx');
+  const outside = path.join(dir, 'elsewhere', 'x.tsx');
+  assert.ok(plugin.transform(greeting, forward(inside)), 'a forward-slash id under the root is transformed, whatever the host separator');
+  assert.ok(plugin.transform(greeting, backward(inside)), 'a backslash id under the root is transformed, whatever the host separator');
+  assert.equal(plugin.transform(greeting, forward(outside)), null, 'a forward-slash id outside the root is left alone');
+  assert.equal(plugin.transform(greeting, backward(outside)), null, 'a backslash id outside the root is left alone');
   const tags = plugin.transformIndexHtml();
   assert.equal(tags[0].tag, 'script');
   assert.match(tags[0].children, /globalThis\.__witness__ = witness/, 'the runtime, verbatim, ahead of every module');
@@ -342,4 +344,53 @@ test('two worker threads write separate record files', async () => {
     records.map((r) => r.test).sort(),
     ['spec.test.js::case 1', 'spec.test.js::case 2'],
   );
+});
+
+/**
+ * A test boundary that breaks must be written down, never papered over.
+ * Before this, begin() on an open test overwrote it: its lines were lost and
+ * everything after was credited to whichever test came last, so a suite
+ * whose afterEach never ran, or whose tests interleave, produced a record
+ * that looked like any other. Now the open test is closed with its boundary
+ * named, and a driver that sees the name refuses to score the run.
+ */
+test('the runtime: a broken test boundary is recorded, not overwritten', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'witness-boundary-'));
+  const hook = path.join(process.cwd(), 'hooks', 'witness.cjs');
+  const script = path.join(dir, 'run.cjs');
+  fs.writeFileSync(
+    script,
+    [
+      `const w = require(${JSON.stringify(hook)});`,
+      "const W = w.register('h', '/p/a.js', { statementMap: { 0: { start: { line: 1 }, end: { line: 1 } } }, fnMap: {}, branchMap: {}, skipped: [{ line: 7, reason: 'why' }] });",
+      "w.begin('t1'); W.s(0);",
+      "w.begin('t2'); W.s(0);", // t1 never ended
+      'w.end();',
+      "w.begin('t3'); W.s(0);",
+      "w.end('unterminated');", // what the loader does at process exit
+      'w.end();', // nothing open: a no-op, not a record
+      "w.unmeasured('/p/b.js', 'could not');",
+      `w.writeReport(${JSON.stringify(path.join(dir, 'cov'))});`,
+      '',
+    ].join('\n'),
+  );
+  execFileSync(process.execPath, [script], { stdio: 'pipe', env: { ...process.env, [ENV.attributionDir]: dir } });
+  const file = fs.readdirSync(dir).find((f) => f.startsWith('attr-witness-'))!;
+  const records = fs.readFileSync(path.join(dir, file), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as { test: string; boundary?: string; files: Record<string, number[]> });
+  assert.deepEqual(
+    records.map((r) => [r.test, r.boundary ?? 'clean']),
+    [
+      ['t1', 'overlapped'],
+      ['t2', 'clean'],
+      ['t3', 'unterminated'],
+    ],
+    'three records, two of them marked, and the fourth end() wrote nothing',
+  );
+  assert.deepEqual(records[0].files, { '/p/a.js': [1] }, 'the overlapped test keeps the lines it had before the next one began');
+  const covDir = path.join(dir, 'cov');
+  const report = JSON.parse(fs.readFileSync(path.join(covDir, 'coverage-final.json'), 'utf8')) as Record<string, { skipped: unknown }>;
+  assert.deepEqual(report['/p/a.js'].skipped, [{ line: 7, reason: 'why' }], 'what the instrumenter skipped rides in the report');
+  const unmeasured = fs.readdirSync(covDir).find((f) => f.startsWith('unmeasured-'))!;
+  assert.ok(unmeasured, 'a file the loader could not instrument is written beside the report');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(covDir, unmeasured), 'utf8')), [{ path: '/p/b.js', reason: 'could not' }]);
 });

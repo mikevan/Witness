@@ -27,6 +27,23 @@ const SKIP = /[\\/](node_modules|\.deeptest|\.untangleit|playwright)[\\/]|\.(tes
 /**
  * @param {{ hooksDir?: string; wasmDir: string; sourceRoot: string }} options
  */
+const unmeasured = new Map();
+
+function noteUnmeasured(file, reason) {
+  const dir = process.env.WITNESS_COVERAGE_DIR;
+  if (!dir) {
+    return;
+  }
+  unmeasured.set(file, String(reason || 'Witness could not instrument it.'));
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const list = Array.from(unmeasured, ([p, r]) => ({ path: p, reason: r }));
+    fs.writeFileSync(path.join(dir, `unmeasured-vite-${process.pid}.json`), JSON.stringify(list));
+  } catch {
+    // never fail the build over the note
+  }
+}
+
 export function witnessPlugin(options) {
   const hooksDir = options.hooksDir || here;
   const sourceRoot = toPosix(path.resolve(options.sourceRoot));
@@ -50,7 +67,12 @@ export function witnessPlugin(options) {
         // treats the output as line-aligned with the input, which it is.
         return { code: out.code, map: null };
       } catch (err) {
+        // The file is served as written. It is written down beside the
+        // reports so the driver shows it as unmeasured, not as measured at
+        // zero. The plugin runs in Vite's process, which has no runtime, so
+        // it writes the file itself, one per process, like the reports.
         this.warn(`Witness could not instrument ${file}: ${err && err.message}`);
+        noteUnmeasured(file, err && err.message);
         return null;
       }
     },

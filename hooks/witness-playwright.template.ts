@@ -38,10 +38,12 @@ export const test = base.extend<{ witness: void }>({
           return { coverage, testId };
         }, id)
         .catch(() => null);
-      if (!out) {
-        return;
-      }
-      fs.appendFileSync(path.join(dir, `coverage-pw-${process.pid}.pwcov`), `${JSON.stringify({ test: out.testId, coverage: out.coverage })}\n`);
+      // A test whose page never loaded the runtime (it mounted nothing, or the
+      // page was gone) still leaves a record, with no coverage in it. The
+      // driver counts records against tests; a missing record reads as
+      // attribution that was cut off, and this test's was not.
+      const record = out ?? { testId: id, coverage: {} };
+      fs.appendFileSync(path.join(dir, `coverage-pw-${process.pid}.pwcov`), `${JSON.stringify({ test: record.testId, coverage: record.coverage })}\n`);
     },
     { auto: true },
   ],

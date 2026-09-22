@@ -51,6 +51,10 @@ registerHooks({
       witness.register(out.handle, file.split(path.sep).join('/'), out.maps);
       return { ...result, source: out.code, shortCircuit: true };
     } catch (err) {
+      // The file runs as written. Say so in the report, not only on stderr:
+      // a driver that walks the source tree would otherwise show it as a
+      // measured file that ran nothing.
+      witness.unmeasured(file.split(path.sep).join('/'), err && err.message);
       process.stderr.write(`Witness could not instrument ${file}: ${err && err.message}\n`);
       return result;
     }
@@ -59,7 +63,9 @@ registerHooks({
 
 process.on('exit', () => {
   try {
-    witness.end();
+    // A test still open at exit never got its end(). Its record is written
+    // marked 'unterminated', so the driver knows the boundary was cut.
+    witness.end('unterminated');
     if (coverageDir) {
       // One file per worker, not per process: a runner with workers has
       // several, in processes or in threads, and the driver sums them all.
