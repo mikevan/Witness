@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.16
+
+Three hooks for Jest: the runtime, the test boundary, and a transformer that
+wraps the project's own.
+
+Jest's `process` is synchronous and this library's instrumenter is not, so
+`witness-jest-transform.cjs` never instruments. It reads the source a driver
+instrumented before the run, from the folder named by
+`WITNESS_INSTRUMENTED_DIR`, substitutes it, and calls the project's
+transformer with it. Its cache key is the upstream key over that text, salted
+with the text itself, so a transformer that keys only on a file path cannot
+serve a stale transform after the instrumenter's output has changed.
+
+`witness-jest-runtime.cjs` loads the runtime from `setupFiles`, ahead of a
+project's own, because an instrumented module calls the runtime in its
+prologue and a project's setup file may import source.
+`witness-jest.cjs` carries the test boundary and writes the whole-run counters
+when each test file finishes, since Jest throws away the environment between
+test files and anything left to process exit would be lost.
+
 ## 1.0.14
 
 The runtime writes down a broken test boundary instead of papering over it.

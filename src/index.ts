@@ -9,8 +9,10 @@
  *     from there: witness.cjs (the runtime), witness-loader.mjs (Node's
  *     loader), witness-vite.mjs (a Vite build), witness-playwright-loader.mjs
  *     and witness-playwright.template.ts (Playwright's workers), mocha.cjs
- *     (the Mocha boundary), and witness-instrument.cjs (the instrumenter,
- *     bundled whole for a process without this package's node_modules).
+ *     (the Mocha boundary), witness-jest-runtime.cjs, witness-jest.cjs and
+ *     witness-jest-transform.cjs (Jest's setup files and its transformer),
+ *     and witness-instrument.cjs (the instrumenter, bundled whole for a
+ *     process without this package's node_modules).
  *   - wasmDir(): the grammars and the tree-sitter runtime the hooks read
  *     through WITNESS_WASM_DIR.
  *   - The environment the hooks read, by name, so a tool sets exactly these.
@@ -39,7 +41,7 @@ export function wasmDir(): string {
 }
 
 /** Every hook file a tool copies into a project, in dist/hooks. */
-export const HOOK_FILES = ['witness.cjs', 'witness-instrument.cjs', 'witness-loader.mjs', 'witness-vite.mjs', 'witness-vitest.mjs', 'witness-playwright-loader.mjs', 'witness-playwright.template.ts', 'mocha.cjs'] as const;
+export const HOOK_FILES = ['witness.cjs', 'witness-instrument.cjs', 'witness-loader.mjs', 'witness-vite.mjs', 'witness-vitest.mjs', 'witness-jest-runtime.cjs', 'witness-jest.cjs', 'witness-jest-transform.cjs', 'witness-playwright-loader.mjs', 'witness-playwright.template.ts', 'mocha.cjs'] as const;
 
 /** The environment the hooks read. A tool sets these on the process it launches. */
 export const ENV = {
@@ -57,6 +59,13 @@ export const ENV = {
   fixture: 'WITNESS_FIXTURE',
   /** the Playwright component package the project uses */
   ctPackage: 'WITNESS_CT_PACKAGE',
+  /**
+   * where the pre-instrumented sources are, mirroring each file's path
+   * relative to the source root. Jest's transform contract is synchronous and
+   * the instrumenter is not, so the Jest path instruments ahead of the run and
+   * the transformer reads from here.
+   */
+  instrumentedDir: 'WITNESS_INSTRUMENTED_DIR',
 } as const;
 
 /** The Node the loader needs: module.registerHooks exists from 22.15.0 and 23.5.0. */

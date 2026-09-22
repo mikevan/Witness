@@ -394,3 +394,74 @@ test('the runtime: a broken test boundary is recorded, not overwritten', () => {
   assert.ok(unmeasured, 'a file the loader could not instrument is written beside the report');
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(covDir, unmeasured), 'utf8')), [{ path: '/p/b.js', reason: 'could not' }]);
 });
+
+/**
+ * The Jest transformer. Jest's `process` is synchronous and the instrumenter
+ * is not, so this file never instruments: the driver does that before the run
+ * and writes the result under the instrumented folder, and this substitutes it
+ * for the source before handing it to the project's own transformer. What has
+ * to hold is that the substitution happens, that the project's transformer is
+ * still the thing that compiles, that a file outside the source root is passed
+ * through untouched, and that the cache key moves whenever either the source
+ * or the instrumentation does.
+ */
+test('the Jest transformer substitutes the instrumented source and still calls the project\'s own', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'witness-jest-'));
+  const sourceRoot = path.join(dir, 'src');
+  const instrumentedDir = path.join(dir, 'instrumented');
+  fs.mkdirSync(path.join(sourceRoot, 'deep'), { recursive: true });
+  fs.mkdirSync(path.join(instrumentedDir, 'deep'), { recursive: true });
+  fs.writeFileSync(path.join(sourceRoot, 'deep', 'a.js'), 'ORIGINAL');
+  fs.writeFileSync(path.join(instrumentedDir, 'deep', 'a.js'), 'INSTRUMENTED');
+  fs.writeFileSync(path.join(sourceRoot, 'plain.js'), 'PLAIN');
+  fs.writeFileSync(path.join(dir, 'outside.js'), 'OUTSIDE');
+  const upstreamPath = path.join(dir, 'upstream.cjs');
+  fs.writeFileSync(
+    upstreamPath,
+    ["module.exports = { createTransformer: (opts) => ({", "  process: (text) => ({ code: `UP[${opts.tag}](${text})` }),", "  getCacheKey: (text) => `base:${text}`,", '}) };', ''].join('\n'),
+  );
+
+  const before = { root: process.env[ENV.sourceRoot], instr: process.env[ENV.instrumentedDir] };
+  process.env[ENV.sourceRoot] = sourceRoot;
+  process.env[ENV.instrumentedDir] = instrumentedDir;
+  try {
+    const transformPath = path.resolve('hooks', 'witness-jest-transform.cjs');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const req = require as unknown as { (id: string): { createTransformer: (o: unknown) => { process: (t: string, p: string) => { code: string }; getCacheKey: (t: string, p: string) => string } }; cache: Record<string, unknown> };
+    delete req.cache[transformPath];
+    const transformer = req(transformPath).createTransformer({ upstream: [upstreamPath, { tag: 'babel' }] });
+
+    assert.equal(transformer.process('ORIGINAL', path.join(sourceRoot, 'deep', 'a.js')).code, 'UP[babel](INSTRUMENTED)', "the instrumented text goes in, and the project's transformer compiles it");
+    assert.equal(transformer.process('PLAIN', path.join(sourceRoot, 'plain.js')).code, 'UP[babel](PLAIN)', 'a file with no instrumented copy falls back to its source rather than failing the run');
+    assert.equal(transformer.process('OUTSIDE', path.join(dir, 'outside.js')).code, 'UP[babel](OUTSIDE)', 'a file outside the source root is never substituted');
+
+    const key = () => transformer.getCacheKey('ORIGINAL', path.join(sourceRoot, 'deep', 'a.js'));
+    const first = key();
+    assert.equal(first, key(), 'the same inputs give the same key');
+    fs.writeFileSync(path.join(instrumentedDir, 'deep', 'a.js'), 'INSTRUMENTED v2');
+    assert.notEqual(first, key(), 'a change in what the instrumenter produced invalidates the cached transform');
+    assert.notEqual(
+      transformer.getCacheKey('CHANGED', path.join(sourceRoot, 'plain.js')),
+      transformer.getCacheKey('PLAIN', path.join(sourceRoot, 'plain.js')),
+      'and for a file with no instrumented copy, the source still decides the key',
+    );
+
+    // The case the salt exists for, and the case the first version of this test
+    // could not see. An upstream whose key does not depend on the text it is
+    // given, because it hashes the file on disk or only its own config, would
+    // hand back the same key for a file whose instrumented text has changed
+    // underneath it, and Jest would serve the stale transform. Removing the
+    // salt has to fail here, and with an upstream that keys on the text it
+    // cannot, because that upstream hides the defect.
+    const blindPath = path.join(dir, 'blind-upstream.cjs');
+    fs.writeFileSync(blindPath, ['module.exports = { createTransformer: () => ({', '  process: (text) => ({ code: text }),', "  getCacheKey: (_text, filePath) => `only-the-path:${filePath}`,", '}) };', ''].join('\n'));
+    const blind = req(transformPath).createTransformer({ upstream: [blindPath, {}] });
+    const target = path.join(sourceRoot, 'deep', 'a.js');
+    const blindFirst = blind.getCacheKey('ORIGINAL', target);
+    fs.writeFileSync(path.join(instrumentedDir, 'deep', 'a.js'), 'INSTRUMENTED v3');
+    assert.notEqual(blindFirst, blind.getCacheKey('ORIGINAL', target), 'the key moves even when the wrapped transformer ignores the text it is handed');
+  } finally {
+    process.env[ENV.sourceRoot] = before.root;
+    process.env[ENV.instrumentedDir] = before.instr;
+  }
+});
