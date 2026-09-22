@@ -26,11 +26,18 @@
  *                       name it would have had, which a plain sequence
  *                       expression would take away
  *   W.f(id)             a function was entered
- *   W.b(id, cond)       a two-way decision (if, ternary); records which
- *                       way it went and returns the condition's value
- *   W.l(id, i, expr)    the i-th operand of a boolean run, or a default
- *                       parameter value, was evaluated; returns it
- *   W.c(id, i)          the i-th case of a switch was entered
+ *   W.c(id, i)          the i-th way through a decision was taken: an arm of
+ *                       an if or a ternary, an operand of a boolean run, a
+ *                       default parameter value, a case of a switch
+ *
+ * Only W.v returns anything, and that is the one place a counter has to sit
+ * around a value. Everywhere else the counter sits BESIDE the value, in the
+ * arm that ran or as the first operand of a comma expression, and never
+ * around the condition that chose it. That is not a style: a condition
+ * wrapped in a call stops narrowing, so `if (W.b(0, p))` leaves `p` possibly
+ * undefined in the body and strict TypeScript refuses the file. Istanbul
+ * places its branch counters the same way, for what is probably the same
+ * reason.
  */
 import type { Node, Parser, Tree } from 'web-tree-sitter';
 
@@ -90,6 +97,47 @@ const STATEMENT_TYPES = new Set([
 const FUNCTION_TYPES = new Set(['function_declaration', 'function_expression', 'function', 'generator_function', 'generator_function_declaration', 'arrow_function', 'method_definition']);
 const LOGICAL = new Set(['&&', '||', '??']);
 export const MISPARSE = 'the grammar reads a non-null assertion (x!) after a logical operator as covering the whole run, so the operands cannot be told apart; the statement is counted, the decision is not';
+
+/**
+ * A decorated class's field initialiser is left exactly as written, because a
+ * compiler may pattern-match it. Angular is the case that proved it: `input()`,
+ * `input.required()` and `computed()` must appear syntactically as the
+ * initialiser of a class member, and wrapping one is rejected outright with
+ * "NG8110: Unsupported call ... This function can only be called in the
+ * initializer of a class member." Measured against @angular/compiler-cli 22: a
+ * call wrapper is refused, and so is a bare sequence expression, so there is no
+ * wrapping form that survives. The initialiser's own function bodies are still
+ * instrumented, which is where the logic lives; only the outer value counter is
+ * given up, and it is recorded here rather than dropped silently.
+ */
+export const DECORATED_FIELD = 'this class carries a decorator, and a decorating compiler may require a field initialiser to appear exactly as written (Angular rejects any wrapper with NG8110), so the initialiser is not counted; code inside it still is';
+
+/**
+ * The type the handle is declared with in a TypeScript file, and the reason
+ * the wrappers are generic.
+ *
+ * `globalThis.__witness__` is declared nowhere, so the prologue has to cast
+ * on the way in, and the obvious cast leaves the handle `any`. That is not
+ * free: `v` returns the value it was given, so a handle typed `any` makes
+ * every instrumented declarator `any` too, and the erasure spreads. `let name = w.v(0, "name", raw.trim())` stops being a string, and
+ * a callback further down the chain then has no contextual type, which under
+ * noImplicitAny is TS7006 and stops the build. Measured on the angular-vitest
+ * and angular-karma ports, both runners, at the same two lines of the same
+ * file. Most paths never type-check the instrumented text and would never
+ * have noticed; Angular's compiler does, which is what makes it the runner
+ * that keeps this honest.
+ *
+ * Written out inline rather than emitted as a named type or a .d.ts, because
+ * the rewrite must stay one line longer than nothing and the file must stay
+ * self-contained: a generated type would have to be reachable from whichever
+ * tsconfig the project happens to compile with.
+ *
+ * No signature can recover narrowing, which is why no counter wraps a
+ * condition any more; see the counter list at the top of this file.
+ */
+const HANDLE_TYPE =
+  '{ s(id: number): void; f(id: number): void; c(id: number, index: number): void; v<T>(id: number, name: string, value: T): T }';
+
 // Logical assignment (a ??= b) is a decision to the structure analysis but not
 // a branch to istanbul-lib-instrument 6, so the Istanbul view leaves it out too.
 const WRAPPING_BODIES: Array<[string, string[]]> = [
@@ -158,6 +206,35 @@ function hash(text: string): string {
   return (h >>> 0).toString(36);
 }
 
+/**
+ * Whether this field belongs to a class carrying a decorator. The rule is
+ * syntactic and names no framework: a decorated class is one whose compiler
+ * reads the class body as data, so its field initialisers are left alone. That
+ * covers Angular, and anything else that does the same, without this file
+ * knowing what Angular is.
+ */
+function inDecoratedClass(field: Node): boolean {
+  const body = field.parent;
+  const declaration = body?.parent;
+  if (!declaration) {
+    return false;
+  }
+  for (let i = 0; i < declaration.childCount; i += 1) {
+    if (declaration.child(i)?.type === 'decorator') {
+      return true;
+    }
+  }
+  // `@Component(...) export class X {}` puts the decorator on the export
+  // statement rather than on the class declaration.
+  const parent = declaration.parent;
+  for (let i = 0; i < (parent?.childCount ?? 0); i += 1) {
+    if (parent?.child(i)?.type === 'decorator') {
+      return true;
+    }
+  }
+  return false;
+}
+
 export class Instrumenter {
   private edits: Edit[] = [];
   private statements: Location[] = [];
@@ -165,6 +242,8 @@ export class Instrumenter {
   private branches: BranchMapEntry[] = [];
   private skipped: Array<{ line: number; reason: string }> = [];
   private handle = '';
+
+  private typescript = false;
 
   constructor(private readonly parser: Parser) {}
 
@@ -175,6 +254,15 @@ export class Instrumenter {
    * browser page); without it the loader registers the maps in-thread.
    */
   instrument(filePath: string, source: string, embedMaps = false): Instrumented {
+    // TypeScript under `noImplicitAny` refuses `globalThis.__witness__` with
+    // TS7017, because the global is not declared anywhere. Most paths never
+    // type-check the instrumented text, but Angular's compiler does, so the
+    // prologue casts on the way in. The cast is TypeScript-only syntax and
+    // would be a syntax error in a .js file, so the extension decides. A
+    // generated .d.ts would also work and is not used: it would have to be
+    // reachable from whichever tsconfig the project happens to compile with,
+    // and this keeps the instrumented file self-contained.
+    this.typescript = /\.[cm]?tsx?$/i.test(filePath);
     this.edits = [];
     this.statements = [];
     this.functions = [];
@@ -262,7 +350,7 @@ export class Instrumenter {
     return out + source.slice(cursor);
   }
 
-  /** `const W = globalThis.__witness__.file("<id>"[, maps]);` after any shebang and directive prologue. */
+  /** `const W = globalThis.__witness__.file("<id>"[, maps]);` after any shebang and directive prologue. TypeScript gets a cast; see instrument(). */
   private prologue(root: Node, source: string, maps?: WitnessMaps): void {
     let at = 0;
     if (source.startsWith('#!')) {
@@ -278,8 +366,17 @@ export class Instrumenter {
       }
       at = child.endIndex;
     }
-    const embedded = maps ? `, ${JSON.stringify({ path: maps.path, statementMap: maps.statementMap, fnMap: maps.fnMap, branchMap: maps.branchMap })}` : '';
-    this.insert(at, `const ${this.handle} = globalThis.__witness__.file(${JSON.stringify(this.handle)}${embedded});`, 0);
+    // `skipped` rides along with the rest. It is easy to read the embedded
+    // maps as only what the counters need and leave it out, and that loses it
+    // exactly where it matters most: the decorated-field skip exists because
+    // of Angular, and Angular in a browser is the embedding path. Without it
+    // the driver would show three uncounted lines in a component and have
+    // nothing to say about why.
+    const embedded = maps
+      ? `, ${JSON.stringify({ path: maps.path, statementMap: maps.statementMap, fnMap: maps.fnMap, branchMap: maps.branchMap, skipped: maps.skipped })}`
+      : '';
+    const declaration = this.typescript ? `const ${this.handle}: ${HANDLE_TYPE} = (globalThis as any)` : `const ${this.handle} = globalThis`;
+    this.insert(at, `${declaration}.__witness__.file(${JSON.stringify(this.handle)}${embedded});`, 0);
   }
 
   // ---- counters ----
@@ -339,17 +436,67 @@ export class Instrumenter {
     return id;
   }
 
-  private wrapCondition(id: number, condition: Node, statementId?: number): void {
-    // `if (x)` keeps its parentheses: the wrapper goes inside them.
+  /**
+   * An `else if` has nowhere to put its statement counter, so it rides in
+   * front of the condition as the first operand of a comma expression. A
+   * comma keeps narrowing: `if ((W.s(2), p))` still narrows `p` in the body,
+   * where `if (W.b(0, p))` did not.
+   */
+  private prefixCondition(condition: Node, statementId: number): void {
+    // `if (x)` keeps its parentheses: the counter goes inside them.
     const target = condition.type === 'parenthesized_expression' && condition.namedChildCount === 1 ? condition.namedChild(0)! : condition;
-    const prefix = statementId === undefined ? '' : `${this.handle}.s(${statementId}), `;
-    this.insert(target.startIndex, `(${prefix}${this.handle}.b(${id}, `, 4);
-    this.insert(target.endIndex, '))', 1, true);
+    this.insert(target.startIndex, `(${this.handle}.s(${statementId}), `, 4);
+    this.insert(target.endIndex, ')', 1, true);
   }
 
-  private wrapOperand(id: number, index: number, node: Node): void {
-    this.insert(node.startIndex, `${this.handle}.l(${id}, ${index}, `, 4);
+  /** `(W.c(id, index), expr)`: the outcome recorded beside the value, never around it. */
+  private markOperand(id: number, index: number, node: Node): void {
+    this.insert(node.startIndex, `(${this.handle}.c(${id}, ${index}), `, 4);
     this.insert(node.endIndex, ')', 1, true);
+  }
+
+  /**
+   * The arm counters of an if, inside the arms, so the condition is left
+   * exactly as the person wrote it and keeps narrowing the body.
+   *
+   * A missing else is given one, because the way not taken still has to be
+   * recorded; istanbul-lib-instrument does the same. That `else` has to be
+   * emitted as part of the consequent's own closing edit rather than as an
+   * edit of its own: an enclosing block can end at the very same offset, and
+   * two independent edits there sort by rules that cannot tell which brace
+   * belongs to whom. `if (a) { if (b) { x } }` came out as
+   * `}} else {...}` when they were separate, which is a syntax error and is
+   * how this was found.
+   */
+  private coverIfArms(id: number, consequence: Node, elseBody: Node | null): void {
+    const bare = consequence.type !== 'statement_block';
+    this.insert(bare ? consequence.startIndex : consequence.startIndex + 1, `${bare ? '{' : ''}${this.handle}.c(${id}, 0);`, 1);
+    const close = `${bare ? '}' : ''}${elseBody ? '' : ` else {${this.handle}.c(${id}, 1);}`}`;
+    if (close) {
+      this.insert(consequence.endIndex, close, 9, true);
+    }
+    if (elseBody) {
+      // An `else if` is braced now, where it used to be left as written: the
+      // arm counter has to go somewhere, and `else W.c(0, 1); if (...)` would
+      // be a different program. The inner if is still a statement of its own
+      // and keeps its own counters inside those braces.
+      this.blockify(elseBody);
+      this.markArm(id, 1, elseBody);
+    }
+  }
+
+  /** `W.c(id, index);` as the first statement of an arm, after any brace blockify added. */
+  private markArm(id: number, index: number, node: Node): void {
+    const text = `${this.handle}.c(${id}, ${index});`;
+    if (node.type === 'statement_block') {
+      this.insert(node.startIndex + 1, text, 2);
+    } else if (node.type === 'empty_statement') {
+      // blockify leaves a bare `;` alone; it is still an arm that can run.
+      this.insert(node.startIndex, `{${text}`, 1);
+      this.insert(node.endIndex, '}', 9, true);
+    } else {
+      this.insert(node.startIndex, text, 2);
+    }
   }
 
   /** Braces around a bare statement body. An `else if` keeps its shape; it is a statement of its own with its own counters. */
@@ -373,7 +520,11 @@ export class Instrumenter {
     } else if (type === 'public_field_definition') {
       const value = node.childForFieldName('value');
       if (value) {
-        this.coverValue(value, node.childForFieldName('name')?.text ?? '');
+        if (inDecoratedClass(node)) {
+          this.skipped.push({ line: value.startPosition.row + 1, reason: DECORATED_FIELD });
+        } else {
+          this.coverValue(value, node.childForFieldName('name')?.text ?? '');
+        }
       }
     } else if (STATEMENT_TYPES.has(type)) {
       // A label must sit directly on its loop for `continue label` to
@@ -399,7 +550,8 @@ export class Instrumenter {
         const consequence = node.childForFieldName('consequence')!;
         const alternative = node.childForFieldName('alternative')!;
         const id = this.branch('cond-expr', node, [loc(consequence), loc(alternative)]);
-        this.wrapCondition(id, condition);
+        this.markOperand(id, 0, consequence);
+        this.markOperand(id, 1, alternative);
       }
     } else if (type === 'binary_expression' && LOGICAL.has(node.childForFieldName('operator')?.text ?? '')) {
       if (!this.isOperandOfSameRun(node)) {
@@ -408,20 +560,20 @@ export class Instrumenter {
         } else {
           const operands = this.flattenRun(node, node.childForFieldName('operator')!.text);
           const id = this.branch('binary-expr', node, operands.map(loc));
-          operands.forEach((o, i) => this.wrapOperand(id, i, o));
+          operands.forEach((o, i) => this.markOperand(id, i, o));
         }
       }
     } else if ((type === 'required_parameter' || type === 'optional_parameter') && node.childForFieldName('value')) {
       const value = node.childForFieldName('value')!;
       const id = this.branch('default-arg', node, [loc(value)]);
-      this.wrapOperand(id, 0, value);
+      this.markOperand(id, 0, value);
     } else if (type === 'assignment_pattern' || type === 'object_assignment_pattern') {
       // A default anywhere a pattern can carry one: a parameter, a
       // destructured parameter, or a destructuring declaration in a body.
       // Istanbul counts them all as default-arg branches.
       const value = node.childForFieldName('right')!;
       const id = this.branch('default-arg', node, [loc(value)]);
-      this.wrapOperand(id, 0, value);
+      this.markOperand(id, 0, value);
     }
     for (let i = 0; i < node.namedChildCount; i += 1) {
       const child = node.namedChild(i);
@@ -438,9 +590,10 @@ export class Instrumenter {
       const alternative = node.childForFieldName('alternative');
       const elseBody = alternative?.namedChild(0) ?? null;
       const id = this.branch('if', node, [loc(consequence), elseBody ? loc(elseBody) : emptyLoc(node)]);
-      this.wrapCondition(id, node.childForFieldName('condition')!, statementInCondition);
-      this.blockify(consequence);
-      this.blockify(elseBody, true);
+      if (statementInCondition !== undefined) {
+        this.prefixCondition(node.childForFieldName('condition')!, statementInCondition);
+      }
+      this.coverIfArms(id, consequence, elseBody);
     } else if (type === 'switch_statement') {
       const body = node.childForFieldName('body')!;
       const cases: Node[] = [];

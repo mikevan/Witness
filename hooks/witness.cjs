@@ -126,21 +126,24 @@ function makeHandle(filePath, cov) {
       cov.f[id] += 1;
       noteEntry(filePath, id);
     },
-    b(id, value) {
-      const index = value ? 0 : 1;
-      cov.b[id][index] += 1;
-      noteOutcome(filePath, id, index);
-      noteLine(filePath, bm[id].locations[index].start.line || bm[id].line);
-      return value;
-    },
-    l(id, index, value) {
-      cov.b[id][index] += 1;
-      noteOutcome(filePath, id, index);
-      return value;
-    },
+    // Every way through a decision reports here: an arm of an if or a
+    // ternary, an operand of a boolean run, a default parameter value, a case
+    // of a switch.
+    //
+    // An arm is a place control went, so the line it starts on is a line the
+    // test reached and is recorded as one; a multi-line if or ternary is
+    // attributed to the test that took that arm and to no other. An operand,
+    // a default value, and a case label are not places, and their lines carry
+    // no statement of their own, so recording them would add lines to the
+    // record that are in no file's executable universe and would be dropped
+    // again downstream.
     c(id, index) {
       cov.b[id][index] += 1;
       noteOutcome(filePath, id, index);
+      const type = bm[id].type;
+      if (type === 'if' || type === 'cond-expr') {
+        noteLine(filePath, bm[id].locations[index].start.line || bm[id].line);
+      }
     },
   };
   return W;
@@ -176,7 +179,7 @@ const witness = {
     if (!entry) {
       // Instrumented by a loader this process never ran: count nothing, break nothing.
       const noop = () => undefined;
-      return { s: noop, f: noop, c: noop, v: (_id, _name, value) => value, b: (_id, value) => value, l: (_id, _i, value) => value };
+      return { s: noop, f: noop, c: noop, v: (_id, _name, value) => value };
     }
     return entry.W;
   },

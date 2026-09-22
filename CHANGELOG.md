@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.0.17
+
+Karma, and two defects in the rewrite that only a type-checking compiler could
+have found.
+
+`witness-karma.cjs` and `witness-karma-client.js` put the runtime in front of
+the bundle and the test boundary on Jasmine, and hand each record back through
+the Karma server. Nothing is mapped and no statement map crosses the wire: a
+driver that instruments the source before the browser sees it gets records
+that already name the person's own files and lines.
+
+The handle is declared with a type now, not cast to `any`. `W.v` returns the
+value it was given, so an `any` handle made every instrumented declarator
+`any` too, and the erasure spread until a callback further down the chain had
+no contextual type. Under `noImplicitAny` that is TS7006, and it stopped an
+Angular build on a real project.
+
+No counter wraps a condition any more. TypeScript cannot narrow a variable
+through a function call, so `if (W.b(0, p))` left `p` possibly undefined in
+the body and `typeof v === 'string'` wrapped the same way lost the union
+refinement. No signature fixes that and no compiler option fixes it, because
+the second failure is not a strictness error. The counters moved into the
+arms instead: an `if` counts inside each arm, with a synthetic `else` when it
+has none, a ternary counts inside each branch, and a boolean run or a default
+value counts as the first operand of a comma expression. The condition is left
+exactly as the person wrote it. That is also where istanbul-lib-instrument
+puts its branch counters. `W.b` and `W.l` are gone; every way through a
+decision reports through `W.c`.
+
+The synthetic `else` has to be emitted as part of the consequent's own closing
+edit. As an edit of its own it collided with an enclosing block that ends at
+the same offset, and `if (a) { if (b) { x } }` came out as `}} else {}`.
+
+A new test compiles the rewrite with `tsc --strict` and fails if any type is
+erased or any narrowing is lost. Both defects reproduce against it.
+
+The embedded maps carry `skipped` as well. A browser page is the only place a
+decorated Angular component is measured, and it is the embedding path, so
+leaving it out lost the skip reason exactly where it was needed.
+
 ## 1.0.16
 
 Three hooks for Jest: the runtime, the test boundary, and a transformer that

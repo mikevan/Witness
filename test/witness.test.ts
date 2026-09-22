@@ -18,7 +18,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { createInstrumenter, repoWasmDir, nodeSupportsWitness, HOOK_FILES, ENV } from '../src/index';
+import { createInstrumenter, repoWasmDir, nodeSupportsWitness, HOOK_FILES, ENV, DECORATED_FIELD } from '../src/index';
 import type { WitnessInstrumenter } from '../src/index';
 
 let witness: WitnessInstrumenter;
@@ -61,7 +61,15 @@ test('every statement shape the rules name: bodies get braces, values get wrappe
   const out = witness.instrument('/p/shapes.mjs', source);
   check(out.code);
   assert.match(out.code, /^'use strict';const __witness_/, 'the prologue follows the directive');
-  assert.match(out.code, /if \(\(__witness_\w+\.b\(\d+, a\)\)\) \{__witness_\w+\.s\(\d+\);return 1;\} else if \(\(__witness_\w+\.s\(\d+\), __witness_\w+\.b\(\d+, b\)\)\)/, "an else-if keeps its else; its statement counter rides in the condition");
+  // The condition is left exactly as written. It used to be wrapped in a
+  // counter call, which stops TypeScript narrowing the variable inside the
+  // body, and strict code then fails to compile; the arms carry the counters
+  // instead, which is also where istanbul-lib-instrument puts them.
+  assert.match(out.code, /if \(a\) \{__witness_\w+\.c\(\d+, 0\);__witness_\w+\.s\(\d+\);return 1;\}/, 'the true arm counts itself, and the condition is untouched');
+  assert.match(out.code, /\} else \{__witness_\w+\.c\(\d+, 1\);if \(\(__witness_\w+\.s\(\d+\), b\)\)/, "an else-if is braced so the else arm can count itself; the inner if's statement counter still rides in front of its condition, where a comma keeps narrowing");
+  assert.match(out.code, /x = \(__witness_\w+\.c\(\d+, 0\), a\) && \(__witness_\w+\.c\(\d+, 1\), b\) \|\| \(__witness_\w+\.c\(\d+, 2\), c\);/, 'each operand of a boolean run is counted beside its value');
+  assert.match(out.code, /x = a \? \(__witness_\w+\.c\(\d+, 0\), 1\) : \(__witness_\w+\.c\(\d+, 1\), 2\);/, 'and so is each arm of a ternary');
+  assert.match(out.code, /function f\(a = \(__witness_\w+\.c\(\d+, 0\), 1\), \{ b \} = \(__witness_\w+\.c\(\d+, 0\), \{\}\)\)/, 'a default value is counted where it is evaluated');
   assert.match(out.code, /outer: while \(u\) \{__witness_\w+\.s\(\d+\);do \{__witness_\w+\.s\(\d+\);u--;\} while \(u\);\}/, 'the label stays on its loop, the loop under it carries no counter of its own');
   assert.match(out.code, /__witness_\w+\.s\(\d+\);a \?\?= b;/, 'logical assignment is a statement, not an Istanbul branch');
   assert.match(out.code, /const g = __witness_\w+\.v\(\d+, "g", \(x\) => \(__witness_\w+\.f\(\d+\), __witness_\w+\.s\(\d+\), x \* 2\)\)/);
@@ -71,6 +79,80 @@ test('every statement shape the rules name: bodies get braces, values get wrappe
   assert.deepEqual(types.filter((t) => t === 'default-arg').length, 2);
   assert.ok(types.includes('switch') && types.includes('cond-expr') && types.includes('binary-expr') && types.includes('if'));
   assert.deepEqual(out.maps.skipped, []);
+});
+
+/**
+ * The instrumented file has to survive a strict type-check, because on the
+ * Angular path it gets one: the builder compiles the shadow tree with the
+ * project's own tsconfig, and a type error there stops the run dead. No other
+ * runner type-checks what Witness emits, so every mistake of this kind is
+ * invisible until Angular finds it, and two were found that way on real
+ * projects rather than here.
+ *
+ * The first was erasure: the handle was `any`, so `let name = W.v(0, "name",
+ * raw.trim())` was `any`, and a callback further down the chain had no
+ * contextual type (TS7006). The second was narrowing: `if (W.b(0, p))` cannot
+ * narrow `p`, so every strict null check in the body failed (TS18048), and
+ * `typeof v === 'string'` wrapped the same way lost the union refinement
+ * (TS2339). The first was fixed by typing the handle, the second by moving
+ * every counter out of the condition.
+ *
+ * Both classes are pinned below by compiling the rewrite with tsc under
+ * --strict, which is the only way to keep them fixed.
+ */
+test('the rewrite type-checks under --strict: no type is erased and no narrowing is lost', () => {
+  const source = [
+    'export interface Person { name?: string; kind: "admin" | "user" }',
+    '',
+    'export function label(p: Person | undefined): string {',
+    '  if (!p) {',
+    '    return "nobody";',
+    '  }',
+    '  if (p.name) {',
+    '    return p.name.toUpperCase();',
+    '  }',
+    '  switch (p.kind) {',
+    '    case "admin":',
+    '      return "ADMIN";',
+    '    default:',
+    '      return "user";',
+    '  }',
+    '}',
+    '',
+    'export function widen(value: string | number): string {',
+    '  return typeof value === "string" ? value.trim() : value.toFixed(2);',
+    '}',
+    '',
+    'export function firstWord(text?: string): string {',
+    '  const parts = text?.split(" ");',
+    '  if (parts && parts.length > 0) {',
+    '    return parts[0];',
+    '  }',
+    '  return "";',
+    '}',
+    '',
+    'export function clean(raw: string): string {',
+    '  let name = raw.trim();',
+    '  return name.split(/\\s+/).map((p) => p.charAt(0)).join("");',
+    '}',
+    '',
+  ].join('\n');
+  // The source itself must be clean, or the test proves nothing about the rewrite.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'witness-strict-'));
+  const tsc = path.join(process.cwd(), 'node_modules', 'typescript', 'bin', 'tsc');
+  const compile = (code: string, name: string): string => {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, code);
+    try {
+      execFileSync(process.execPath, [tsc, '--noEmit', '--strict', '--target', 'ES2022', '--skipLibCheck', file], { stdio: 'pipe' });
+      return '';
+    } catch (err) {
+      return String((err as { stdout?: Buffer }).stdout ?? err);
+    }
+  };
+  assert.equal(compile(source, 'plain.ts'), '', 'the fixture is clean to begin with');
+  assert.equal(compile(witness.instrument('/p/strict.ts', source).code, 'instrumented.ts'), '', 'and stays clean once instrumented');
+  assert.equal(compile(witness.instrument('/p/embedded.ts', source, true).code, 'embedded.ts'), '', 'with the maps embedded too, which is the Angular case');
 });
 
 test('a TypeScript non-null assertion after a logical operator is blanked before parsing (tree-sitter-typescript issue 299)', () => {
@@ -241,8 +323,10 @@ test('the Vite plugin: instruments a component build with the maps embedded and 
   const greeting = "import { hello } from '../greet';\nexport function Greeting({ name }: { name: string }) {\n  return <h1>{name ? hello(name) : 'nobody'}</h1>;\n}\n";
   const out = plugin.transform(greeting, path.join(src, 'components', 'Greeting.tsx'));
   assert.ok(out, 'a source under the root is transformed');
-  assert.match(out.code, /globalThis\.__witness__\.file\("__witness_\w+", \{"path":/, 'the maps ride in the file: a page cannot be told about it any other way');
-  assert.match(out.code, /\(__witness_\w+\.b\(0, name\)\) \? hello\(name\) : 'nobody'/);
+  // TypeScript gets a cast in the prologue, because Angular's compiler type-checks
+  // instrumented source and TS7017 rejects an undeclared `globalThis.__witness__`.
+  assert.match(out.code, /\(globalThis as any\)\.__witness__\.file\("__witness_\w+", \{"path":/, 'the maps ride in the file: a page cannot be told about it any other way');
+  assert.match(out.code, /name \? \(__witness_\w+\.c\(0, 0\), hello\(name\)\) : \(__witness_\w+\.c\(0, 1\), 'nobody'\)/);
   assert.equal(out.code.split('\n').length, greeting.split('\n').length);
   assert.equal(plugin.transform(greeting, path.join(src, 'components', 'Greeting.spec.tsx')), null, 'a spec is left alone');
   assert.equal(plugin.transform(greeting, path.join(dir, 'elsewhere', 'x.tsx')), null, 'outside the root is left alone');
@@ -344,6 +428,57 @@ test('two worker threads write separate record files', async () => {
     records.map((r) => r.test).sort(),
     ['spec.test.js::case 1', 'spec.test.js::case 2'],
   );
+});
+
+/**
+ * Angular's compiler requires `input()`, `input.required()` and `computed()`
+ * to appear syntactically as a class-member initialiser; any wrapper around
+ * one is NG8110 and the build stops. So a decorated class's field
+ * initialisers are left exactly as written and recorded as skipped, with the
+ * reason, while the code inside them is still counted. The skip has to reach
+ * the driver through the embedded maps as well as through the loader: a
+ * browser page is the only place a decorated Angular component is measured,
+ * and it is the embedding path. Leaving `skipped` out of the embed would
+ * show three uncounted lines in a component with nothing to say about them.
+ */
+test('a decorated class keeps its field initialisers as written, and says so through the embedded maps', () => {
+  const component = [
+    "import { Component, computed, input } from '@angular/core';",
+    "import { hello } from './greet';",
+    '',
+    "@Component({ selector: 'app-greeting', templateUrl: './greeting.html' })",
+    'export class Greeting {',
+    '  readonly name = input.required<string>();',
+    '  readonly loud = input(false);',
+    '  readonly text = computed(() => {',
+    '    return this.loud() ? hello(this.name()) : this.name();',
+    '  });',
+    '}',
+    '',
+  ].join('\n');
+  const out = witness.instrument('/p/greeting.ts', component, true);
+  assert.equal(out.code.split('\n').length, component.split('\n').length);
+  assert.match(out.code, /readonly name = input\.required<string>\(\);/, 'the initialiser survives verbatim: a wrapper here is NG8110');
+  assert.match(out.code, /readonly loud = input\(false\);/);
+  assert.match(out.code, /readonly text = computed\(\(\) => \{/);
+  assert.match(out.code, /return this\.loud\(\) \? \(__witness_\w+\.c\(0, 0\), hello\(this\.name\(\)\)\) : \(__witness_\w+\.c\(0, 1\), this\.name\(\)\);/, 'but the code inside the initialiser is still counted');
+  assert.deepEqual(
+    out.maps.skipped.map((s) => s.line),
+    [6, 7, 8],
+    'one per field initialiser, at the line it is written on',
+  );
+  assert.ok(
+    out.maps.skipped.every((s) => s.reason === DECORATED_FIELD),
+    'named with the reason, so the driver can explain it rather than report three dead lines',
+  );
+
+  const prologue = out.code.slice(0, out.code.indexOf('\n'));
+  const embedded = JSON.parse(prologue.slice(prologue.indexOf('", ') + 3, prologue.lastIndexOf(');'))) as { skipped?: Array<{ line: number; reason: string }> };
+  assert.deepEqual(embedded.skipped, out.maps.skipped, 'and it rides in the file, because a page cannot be told any other way');
+
+  const plain = witness.instrument('/p/plain.ts', 'export class Plain {\n  readonly name = 1;\n}\n', true);
+  assert.deepEqual(plain.maps.skipped, [], 'an undecorated class is not excused: its field initialiser is counted like any other value');
+  assert.match(plain.code, /__witness_\w+\.v\(0, "name", 1\)/);
 });
 
 /**

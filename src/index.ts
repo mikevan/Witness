@@ -24,7 +24,7 @@
  */
 import * as path from 'node:path';
 
-export { Instrumenter } from './instrument';
+export { Instrumenter, DECORATED_FIELD, MISPARSE } from './instrument';
 export type { Instrumented, WitnessMaps } from './instrument';
 export { createInstrumenter } from './hook';
 export type { WitnessInstrumenter } from './hook';
@@ -41,7 +41,7 @@ export function wasmDir(): string {
 }
 
 /** Every hook file a tool copies into a project, in dist/hooks. */
-export const HOOK_FILES = ['witness.cjs', 'witness-instrument.cjs', 'witness-loader.mjs', 'witness-vite.mjs', 'witness-vitest.mjs', 'witness-jest-runtime.cjs', 'witness-jest.cjs', 'witness-jest-transform.cjs', 'witness-playwright-loader.mjs', 'witness-playwright.template.ts', 'mocha.cjs'] as const;
+export const HOOK_FILES = ['witness.cjs', 'witness-instrument.cjs', 'witness-loader.mjs', 'witness-vite.mjs', 'witness-vitest.mjs', 'witness-jest-runtime.cjs', 'witness-jest.cjs', 'witness-jest-transform.cjs', 'witness-karma.cjs', 'witness-karma-client.js', 'witness-playwright-loader.mjs', 'witness-playwright.template.ts', 'mocha.cjs'] as const;
 
 /** The environment the hooks read. A tool sets these on the process it launches. */
 export const ENV = {
