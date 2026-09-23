@@ -600,3 +600,123 @@ test('the Jest transformer substitutes the instrumented source and still calls t
     process.env[ENV.instrumentedDir] = before.instr;
   }
 });
+
+/**
+ * The boundary recorder, end to end: instrument one function, run the
+ * program, and read what came back.
+ *
+ * The rewrite has to be invisible to the code it watches. It wraps the body
+ * in try/catch rather than in a function, so `this`, `arguments`, and every
+ * control-flow statement keep working, and it never attaches anything to a
+ * caller-visible promise, because a rejection handler that was not there
+ * changes unhandled-rejection behaviour. A recorder that changes what it
+ * measures is worse than no recorder.
+ */
+test('the boundary recorder: entries, returns, throws, and an async boundary observed from inside', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'witness-boundary-'));
+  const hooks = hooksFolder(dir);
+  const source = [
+    'export class Greeter {',
+    '  greet(name, loud) {',
+    '    if (!name) {',
+    '      throw new TypeError("no name");',
+    '    }',
+    '    if (loud) {',
+    '      return name.toUpperCase();',
+    '    }',
+    '    return name;',
+    '  }',
+    '}',
+    'export function plain(n) {',
+    '  if (n < 0) {',
+    '    return;',
+    '  }',
+    '  n + 1;',
+    '}',
+    'export async function later(x) {',
+    '  if (x === 0) {',
+    '    throw new RangeError("zero");',
+    '  }',
+    '  return x * 2;',
+    '}',
+    'export function mapper(list) {',
+    '  const doubled = list.map(function (n) { return n * 2; });',
+    '  return doubled.length;',
+    '}',
+    'export function wrapper() {',
+    '  return Promise.reject(new Error("nobody handles me"));',
+    '}',
+    'export function mutate(bag) {',
+    '  bag.items.push("late");',
+    '  return bag.items.length;',
+    '}',
+    '',
+  ].join('\n');
+
+  const greet = witness.instrumentBoundary('/p/g.mjs', source, { name: 'greet', container: 'Greeter' });
+  assert.ok(greet.ok, 'the method is found by name inside its class');
+  assert.equal(greet.target.line, 2);
+  assert.equal(greet.target.async, false);
+  assert.equal(greet.code.split('\n').length, source.split('\n').length, 'every line stays where it was');
+  check(greet.code);
+
+  assert.equal(witness.instrumentBoundary('/p/g.mjs', source, { name: 'missing' }).ok, false);
+  const ambiguous = witness.instrumentBoundary('/p/g.mjs', 'function f(){}\nclass A { f(){} }\n', { name: 'f' });
+  assert.deepEqual(ambiguous, { ok: false, reason: 'ambiguous', found: 2 }, 'two functions of that name is a question for the caller, never a guess');
+
+  // One file carrying all three boundaries, so one run exercises them all.
+  let code = source;
+  for (const target of [{ name: 'greet', container: 'Greeter' }, { name: 'plain' }, { name: 'later' }, { name: 'mapper' }, { name: 'wrapper' }, { name: 'mutate' }]) {
+    const out = witness.instrumentBoundary('/p/g.mjs', code, target);
+    assert.ok(out.ok, `${target.name} is found`);
+    code = out.code;
+  }
+  fs.writeFileSync(path.join(dir, 'g.mjs'), code);
+  fs.writeFileSync(
+    path.join(dir, 'run.mjs'),
+    [
+      `import { createRequire } from 'node:module';`,
+      `createRequire(import.meta.url)(${JSON.stringify(path.join(hooks, 'witness-boundary.cjs').split(path.sep).join('/'))});`,
+      `globalThis.__witness__ = { current: 't1' };`,
+      // Counting the rejections Node reports as unhandled is how the run proves
+      // the recorder attached nothing: a handler the recorder added would have
+      // handled this one, and the count would be zero.
+      `let unhandled = 0;`,
+      `process.on('unhandledRejection', () => { unhandled += 1; });`,
+      `const { Greeter, plain, later, mapper, wrapper, mutate } = await import('./g.mjs');`,
+      `const g = new Greeter();`,
+      `if (g.greet('Jeff', false) !== 'Jeff') { throw new Error('the rewrite changed the answer'); }`,
+      `if (g.greet('Jeff', true) !== 'JEFF') { throw new Error('the rewrite changed the answer'); }`,
+      `try { g.greet(''); } catch (e) { if (!(e instanceof TypeError)) { throw new Error('the rewrite changed the error'); } }`,
+      `plain(-1);`,
+      `if (await later(21) !== 42) { throw new Error('the rewrite changed the answer'); }`,
+      `try { await later(0); } catch (e) { if (!(e instanceof RangeError)) { throw new Error('the rewrite changed the rejection'); } }`,
+      `if (mapper([1, 2, 3]) !== 3) { throw new Error('the rewrite changed the answer'); }`,
+      `wrapper();`,
+      `const bag = { items: ['a'] };`,
+      `if (mutate(bag) !== 2) { throw new Error('the rewrite changed the answer'); }`,
+      `await new Promise((r) => setTimeout(r, 20));`,
+      `console.log('ran unhandled=' + unhandled);`,
+      '',
+    ].join('\n'),
+  );
+  const out = execFileSync(process.execPath, [path.join(dir, 'run.mjs')], { env: { ...process.env, WITNESS_BOUNDARY_DIR: dir }, encoding: 'utf8' });
+  assert.match(out, /ran unhandled=1/, 'the program behaves exactly as it did, and the rejection nobody handled is still unhandled');
+
+  const lines = fs.readdirSync(dir).filter((f) => f.startsWith('boundary-'));
+  assert.equal(lines.length, 1);
+  const seen = fs.readFileSync(path.join(dir, lines[0]), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as { target: string; test: string; index: number; depth: number; args: { t: string; v: unknown }; outcome: { kind: string; value: { t: string; v: unknown } } });
+
+  assert.deepEqual(seen.map((r) => `${r.target}:${r.outcome.kind}`), ['Greeter.greet:return', 'Greeter.greet:return', 'Greeter.greet:throw', 'plain:return', 'later:resolve', 'later:reject', 'mapper:return', 'wrapper:return', 'mutate:return']);
+  assert.deepEqual(seen.map((r) => r.index), [0, 1, 2, 3, 4, 5, 6, 7, 8], 'one index per entry, in entry order, within the test that was running');
+  assert.ok(seen.every((r) => r.test === 't1' && r.depth === 0));
+  assert.deepEqual(seen[0].args, { t: 'array', v: [{ t: 'str', v: 'Jeff' }, { t: 'bool', v: false }] }, 'arguments as they arrived, in the tagged form the comparator reads');
+  assert.deepEqual(seen[1].outcome.value, { t: 'str', v: 'JEFF' });
+  assert.deepEqual(seen[2].outcome.value, { t: 'error', v: { name: 'TypeError', message: 'no name' } });
+  assert.deepEqual(seen[3].outcome.value, { t: 'undefined' }, 'a bare return records the undefined it hands back');
+  assert.deepEqual(seen[4].outcome.value, { t: 'num', v: '42' }, 'an async return is observed inside the async boundary, never on the promise');
+  assert.deepEqual(seen[5].outcome.value, { t: 'error', v: { name: 'RangeError', message: 'zero' } });
+  assert.deepEqual(seen[6].outcome.value, { t: 'num', v: '3' }, 'a return inside a nested function belongs to that function, not to this boundary');
+  assert.deepEqual(seen[7].outcome.value, { t: 'uncomparable', why: 'thenable' }, 'a promise returned by a function that is not async is recorded as uncomparable, never subscribed to');
+  assert.deepEqual(seen[8].args, { t: 'array', v: [{ t: 'object', v: { items: { t: 'array', v: [{ t: 'str', v: 'a' }] } } }] }, 'arguments are snapshotted at entry, so a method that mutates what it was handed is not compared against its own mutation');
+});

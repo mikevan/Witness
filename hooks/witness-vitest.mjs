@@ -25,6 +25,15 @@ const require = createRequire(import.meta.url);
 const hooksDir = process.env.WITNESS_HOOKS_DIR;
 const witness = require(hooksDir ? path.join(hooksDir, 'witness.cjs') : './witness.cjs');
 
+// A recorded run needs the boundary runtime in the worker before the rewritten
+// function is loaded, for the same reason the counter runtime has to be here:
+// the plugin instruments in Vite's process, and this is the only hook that runs
+// in the process the code runs in. It is a separate global and a separate file,
+// so an ordinary measured run never loads it.
+if (process.env.WITNESS_BOUNDARY_TARGET && hooksDir) {
+  require(path.join(hooksDir, 'witness-boundary.cjs'));
+}
+
 function testId() {
   const state = expect.getState();
   const file = state.testPath ? path.relative(process.cwd(), state.testPath).split(path.sep).join('/') : '?';

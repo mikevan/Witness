@@ -18,3 +18,11 @@ const path = require('node:path');
 
 const hooksDir = process.env.WITNESS_HOOKS_DIR;
 require(hooksDir ? path.join(hooksDir, 'witness.cjs') : './witness.cjs');
+
+// A recorded run needs the boundary runtime here too, and for the same
+// reason: the rewritten function calls it as soon as it is entered, and Jest
+// hands every test file a fresh global. It is a separate global and a
+// separate record file, so an ordinary measured run never loads it.
+if (process.env.WITNESS_BOUNDARY_TARGET && hooksDir) {
+  require(path.join(hooksDir, 'witness-boundary.cjs'));
+}

@@ -22,51 +22,21 @@
  * entered: { path: [functionIds] } }, and coverage-<pid>.json per process in
  * Istanbul's shape. The design is in docs/witness.md.
  */
-import * as path from 'node:path';
-
 export { Instrumenter, DECORATED_FIELD, MISPARSE } from './instrument';
+export { BoundaryInstrumenter } from './boundary';
+export type { BoundaryTarget, BoundaryMatch, BoundaryInstrumented, Captured, OutcomeKind, Observation, Problem, BoundaryRecord } from './boundary';
+export { isProblem, readBoundaryRecords } from './boundary';
 export type { Instrumented, WitnessMaps } from './instrument';
 export { createInstrumenter } from './hook';
-export type { WitnessInstrumenter } from './hook';
+export type { WitnessInstrumenter, BoundaryEnvTarget } from './hook';
+export { parseBoundaryTarget } from './hook';
 export { initTreeSitter, loadLanguage, createParser, repoWasmDir } from './treeSitter';
-
-/** The hook files as built, beside this module's dist. */
-export function hooksDir(): string {
-  return path.join(__dirname, 'hooks');
-}
-
-/** The tree-sitter runtime and the three grammars, beside this module's dist. */
-export function wasmDir(): string {
-  return __dirname;
-}
-
-/** Every hook file a tool copies into a project, in dist/hooks. */
-export const HOOK_FILES = ['witness.cjs', 'witness-instrument.cjs', 'witness-loader.mjs', 'witness-vite.mjs', 'witness-vitest.mjs', 'witness-jest-runtime.cjs', 'witness-jest.cjs', 'witness-jest-transform.cjs', 'witness-karma.cjs', 'witness-karma-client.js', 'witness-playwright-loader.mjs', 'witness-playwright.template.ts', 'mocha.cjs'] as const;
-
-/** The environment the hooks read. A tool sets these on the process it launches. */
-export const ENV = {
-  /** where the hook files are (witness.cjs and witness-instrument.cjs) */
-  hooksDir: 'WITNESS_HOOKS_DIR',
-  /** where the grammars are */
-  wasmDir: 'WITNESS_WASM_DIR',
-  /** absolute folder whose files are instrumented */
-  sourceRoot: 'WITNESS_SOURCE_ROOT',
-  /** where coverage-<pid>.json goes at exit */
-  coverageDir: 'WITNESS_COVERAGE_DIR',
-  /** where the per-test records go */
-  attributionDir: 'WITNESS_ATTRIBUTION_DIR',
-  /** absolute path of the Playwright fixture file */
-  fixture: 'WITNESS_FIXTURE',
-  /** the Playwright component package the project uses */
-  ctPackage: 'WITNESS_CT_PACKAGE',
-  /**
-   * where the pre-instrumented sources are, mirroring each file's path
-   * relative to the source root. Jest's transform contract is synchronous and
-   * the instrumenter is not, so the Jest path instruments ahead of the run and
-   * the transformer reads from here.
-   */
-  instrumentedDir: 'WITNESS_INSTRUMENTED_DIR',
-} as const;
+export { hooksDir, wasmDir, HOOK_FILES, ENV, copyHooks, readPackageJson, findVitestConfig, resolveModuleDir, detectRunner, vitestWrapperConfig, witnessTransform, angularKarmaConfig, writeShadowTree, writeShadowTsConfig, parseTsConfigText, readTsPaths, renameTestFiles, posixPath, splitArgs, escapeRegex, instrumentedPathFor, writeInstrumented, detectPlaywrightCt, writePlaywrightFixture, playwrightWrapperConfig, detectAngularTestTarget } from './delivery';
+export type { Runner, Rewrite, ShadowTree, TsPaths, JestResolvedConfig, AngularTestTarget } from './delivery';
+export { pathCondition, pathConditionNote, upstreamPathFailure, presentPathFailure } from './compatibility';
+export type { PathCondition, UpstreamPathFailure, PathFailurePresentation } from './compatibility';
+export { buildFailureBrief, unclassifiedPacket, describeRunner } from './diagnosis';
+export type { ProblemPacket } from './diagnosis';
 
 /** The Node the loader needs: module.registerHooks exists from 22.15.0 and 23.5.0. */
 export function nodeSupportsWitness(version: string): boolean {

@@ -62,6 +62,18 @@
       } catch (e) {
         // Never fail the user's tests over attribution.
       }
+      try {
+        // A recorded run: the boundary runtime held its observations because
+        // there is no disk in a page. They go back over the same wire, and
+        // the reporter writes them where every other runner writes them.
+        var b = window.__witnessBoundary__;
+        var carried = b && b.drain ? b.drain() : [];
+        if (carried.length) {
+          karma.info({ witness: { boundary: carried } });
+        }
+      } catch (e) {
+        // Never fail the user's tests over a recording.
+      }
     },
     jasmineDone: function () {
       try {

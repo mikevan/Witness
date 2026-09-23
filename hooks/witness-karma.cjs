@@ -26,6 +26,8 @@ const path = require('node:path');
 const attributionDir = process.env.WITNESS_ATTRIBUTION_DIR;
 const coverageDir = process.env.WITNESS_COVERAGE_DIR;
 const attributionFile = attributionDir ? path.join(attributionDir, `attr-witness-karma-${process.pid}.jsonl`) : undefined;
+const boundaryDir = process.env.WITNESS_BOUNDARY_DIR;
+const boundaryFile = boundaryDir ? path.join(boundaryDir, `boundary-karma-${process.pid}.jsonl`) : undefined;
 
 function framework(files) {
   // Unshifted, not pushed: Jasmine's own framework has already put itself at
@@ -33,6 +35,13 @@ function framework(files) {
   // adapter. Both are served as classic scripts; witness.cjs guards its
   // Node-only requires on `process`, so it loads in a page as written.
   files.push({ pattern: path.join(__dirname, 'witness.cjs'), included: true, served: true, watched: false });
+  if (process.env.WITNESS_BOUNDARY_TARGET) {
+    // A recorded run: the boundary runtime goes in the page too, before the
+    // bundle, because the rewritten function calls it as soon as it is
+    // entered. It guards its Node-only requires, so it loads in a page as
+    // written, and it holds its records for the client to carry back.
+    files.push({ pattern: path.join(__dirname, 'witness-boundary.cjs'), included: true, served: true, watched: false });
+  }
   files.push({ pattern: path.join(__dirname, 'witness-karma-client.js'), included: true, served: true, watched: false });
 }
 framework.$inject = ['config.files'];
@@ -46,6 +55,10 @@ function reporter(emitter) {
     try {
       if (message.record && attributionFile) {
         fs.appendFileSync(attributionFile, `${JSON.stringify(message.record)}\n`);
+      }
+      if (message.boundary && message.boundary.length && boundaryFile) {
+        fs.mkdirSync(boundaryDir, { recursive: true });
+        fs.appendFileSync(boundaryFile, `${message.boundary.map((r) => JSON.stringify(r)).join('\n')}\n`);
       }
       if (message.coverage && coverageDir) {
         fs.mkdirSync(coverageDir, { recursive: true });
